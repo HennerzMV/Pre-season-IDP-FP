@@ -140,6 +140,10 @@
     margin-left:auto; font-family:var(--font-mono); font-size:0.74rem; color:inherit;
     background:rgba(0,0,0,0.14); padding:2px 8px; border-radius:20px; flex:none;
   }
+  .cat-card .card-header .cat-avg{
+    font-family:var(--font-mono); font-size:0.74rem; font-weight:700; color:inherit;
+    background:rgba(0,0,0,0.14); padding:2px 8px; border-radius:20px; flex:none;
+  }
   .rating-row{
     display:flex; flex-direction:column; gap:10px;
     padding:12px 0; border-top:1px dashed var(--border);
@@ -404,8 +408,8 @@
   // and the same secret word you set as SHARED_SECRET in that script.
   // Until you do, submitting here just shows the download-your-copy
   // screen — nothing is sent anywhere.
-  var SUBMIT_URL = "https://script.google.com/macros/s/AKfycbzgA7moBhvnXEExg_REpH1uRc_JDocxTtttz0Wua8zP0qLi5JPXB85xSIQX3codgI3A/exec";
-  var SUBMIT_SECRET = "ORINOCCO";
+  var SUBMIT_URL = "PASTE_YOUR_WEB_APP_URL_HERE";
+  var SUBMIT_SECRET = "PASTE_YOUR_SHARED_SECRET_HERE";
 
   // ---------- field definitions ----------
   var TECHNICAL = [
@@ -526,7 +530,8 @@
     if(!el) return;
     el.innerHTML =
       '<div class="card-header bar-' + cat.bar + '"><h2>' + esc(cat.title) + '</h2>' +
-        '<span class="cat-count mono" id="count_' + cat.key + '">0 / ' + cat.items.length + '</span></div>' +
+        '<span class="cat-count mono" id="count_' + cat.key + '">0 / ' + cat.items.length + '</span>' +
+        '<span class="cat-avg mono" id="avg_' + cat.key + '">Avg —</span></div>' +
       '<p class="card-intro">' + esc(cat.question) + '</p>' +
       cat.items.map(function(item){ return ratingRowHTML(cat.key, item); }).join("");
   }
@@ -698,16 +703,19 @@
   function recomputeProgress(){
     var total = 0, rated = 0, sum = 0;
     CATEGORIES.forEach(function(cat){
-      var catRated = 0;
+      var catRated = 0, catSum = 0;
       cat.items.forEach(function(item){
         total++;
         var sel = document.getElementById("score_" + cat.key + "_" + item.k);
         if(sel && sel.dataset.value !== ""){
           rated++; catRated++; sum += Number(sel.dataset.value);
+          catSum += Number(sel.dataset.value);
         }
       });
       var countEl = document.getElementById("count_" + cat.key);
       if(countEl) countEl.textContent = catRated + " / " + cat.items.length;
+      var avgEl = document.getElementById("avg_" + cat.key);
+      if(avgEl) avgEl.textContent = catRated ? "Avg " + (catSum/catRated).toFixed(1) : "Avg —";
     });
     document.getElementById("progressLabel").textContent = rated + " / " + total + " rated";
     document.getElementById("progressFill").style.width = (total ? Math.round(rated/total*100) : 0) + "%";
@@ -877,20 +885,170 @@
   // A hand-rolled, dependency-free PDF writer: no external library is
   // loaded (this page has to keep working with no network access and no
   // external scripts, whether it's published as a Claude artifact or
-  // hosted plainly), so this builds the PDF file bytes directly using the
-  // built-in Courier / Courier-Bold fonts every PDF viewer supports
-  // without any embedded font data. Courier is fixed-width, which keeps
-  // line-wrapping simple and reliable (every character is the same width,
-  // so wrapping is just counting characters — no font-metrics table
-  // needed, unlike a proportional font such as Helvetica).
+  // hosted plainly), so this builds the PDF file bytes directly. Text is
+  // set in Helvetica / Helvetica-Bold -- two of the PDF spec's 14 "base"
+  // fonts that every PDF viewer already has built in, so nothing needs to
+  // be embedded in the file. Helvetica is a clean modern sans-serif, much
+  // closer in spirit to the page's Montserrat than a typewriter-style
+  // monospace font would be. Embedding the exact Montserrat font file
+  // itself isn't possible here (that needs the actual font binary, which
+  // this environment has no network access to fetch), but Helvetica gets
+  // the same clean, modern, sans-serif feel without needing any embedded
+  // font data at all.
+  //
+  // Because Helvetica is proportionally spaced (unlike a monospace font),
+  // line-wrapping and table columns are laid out by actual measured text
+  // width in points, using Helvetica's standard published character widths
+  // (Adobe's public font metrics for the 14 base fonts -- the same numbers
+  // every PDF library uses), rather than by counting characters.
+  //
+  // The document is built as two SECTIONS: (1) the intro (title/player
+  // details/season ahead) immediately followed, on the same page(s), by
+  // the rating tables laid out in two side-by-side half-width columns
+  // (Technical+Tactical on the left, Physical+Psycho-Social on the right)
+  // so all four categories plus the intro fit together; and (2) the
+  // strengths/improvements/goals summary, which starts fresh on its own
+  // page after that.
   var PDF_PAGE_W = 595, PDF_PAGE_H = 842; // A4, in points
   var PDF_MARGIN_L = 50, PDF_MARGIN_R = 50, PDF_MARGIN_TOP = 56, PDF_MARGIN_BOTTOM = 50;
   var PDF_BODY_SIZE = 9.5, PDF_HEAD_SIZE = 11, PDF_TITLE_SIZE = 15;
-  var PDF_CHAR_W_FACTOR = 0.6; // Courier's fixed advance width, as a fraction of its font size
   var PDF_LEADING_FACTOR = 1.4;
+  var PDF_INK_DEFAULT = "#211d17"; // matches the page's --ink CSS variable
+  var PDF_CONTENT_W = PDF_PAGE_W - PDF_MARGIN_L - PDF_MARGIN_R;
+  var PDF_COL_GUTTER = 16;
+  var PDF_COL_W = (PDF_CONTENT_W - PDF_COL_GUTTER) / 2;
+  var PDF_NOTE_MAX_CHARS = 50; // ratings notes are truncated to this length
 
-  function pdfCharsPerLine(size){
-    return Math.max(20, Math.floor((PDF_PAGE_W - PDF_MARGIN_L - PDF_MARGIN_R) / (size * PDF_CHAR_W_FACTOR)));
+  // Standard Helvetica / Helvetica-Bold metrics (Adobe's public AFM font
+  // metrics, WinAnsiEncoding character codes 32-255, widths in 1/1000 em).
+  var PDF_HELV_WIDTHS = {
+    32:278,33:278,34:355,35:556,36:556,37:889,38:667,39:191,40:333,41:333,42:389,43:584,44:278,45:333,46:278,
+    47:278,48:556,49:556,50:556,51:556,52:556,53:556,54:556,55:556,56:556,57:556,58:278,59:278,60:584,61:584,
+    62:584,63:556,64:1015,65:667,66:667,67:722,68:722,69:667,70:611,71:778,72:722,73:278,74:500,75:667,76:556,
+    77:833,78:722,79:778,80:667,81:778,82:722,83:667,84:611,85:722,86:667,87:944,88:667,89:667,90:611,91:278,
+    92:278,93:278,94:469,95:556,96:333,97:556,98:556,99:500,100:556,101:556,102:278,103:556,104:556,105:222,
+    106:222,107:500,108:222,109:833,110:556,111:556,112:556,113:556,114:333,115:500,116:278,117:556,118:500,
+    119:722,120:500,121:500,122:500,123:334,124:260,125:334,126:584,127:350,128:556,129:350,130:222,131:556,
+    132:333,133:1000,134:556,135:556,136:333,137:1000,138:667,139:333,140:1000,141:350,142:611,143:350,144:350,
+    145:222,146:222,147:333,148:333,149:350,150:556,151:1000,152:333,153:1000,154:500,155:333,156:944,157:350,
+    158:500,159:667,160:278,161:333,162:556,163:556,164:556,165:556,166:260,167:556,168:333,169:737,170:370,
+    171:556,172:584,173:333,174:737,175:333,176:400,177:584,178:333,179:333,180:333,181:556,182:537,183:278,
+    184:333,185:333,186:365,187:556,188:834,189:834,190:834,191:611,192:667,193:667,194:667,195:667,196:667,
+    197:667,198:1000,199:722,200:667,201:667,202:667,203:667,204:278,205:278,206:278,207:278,208:722,209:722,
+    210:778,211:778,212:778,213:778,214:778,215:584,216:778,217:722,218:722,219:722,220:722,221:667,222:667,
+    223:611,224:556,225:556,226:556,227:556,228:556,229:556,230:889,231:500,232:556,233:556,234:556,235:556,
+    236:278,237:278,238:278,239:278,240:556,241:556,242:556,243:556,244:556,245:556,246:556,247:584,248:611,
+    249:556,250:556,251:556,252:556,253:500,254:556,255:500
+  };
+  var PDF_HELV_BOLD_WIDTHS = {
+    32:278,33:333,34:474,35:556,36:556,37:889,38:722,39:238,40:333,41:333,42:389,43:584,44:278,45:333,46:278,
+    47:278,48:556,49:556,50:556,51:556,52:556,53:556,54:556,55:556,56:556,57:556,58:333,59:333,60:584,61:584,
+    62:584,63:611,64:975,65:722,66:722,67:722,68:722,69:667,70:611,71:778,72:722,73:278,74:556,75:722,76:611,
+    77:833,78:722,79:778,80:667,81:778,82:722,83:667,84:611,85:722,86:667,87:944,88:667,89:667,90:611,91:333,
+    92:278,93:333,94:584,95:556,96:333,97:556,98:611,99:556,100:611,101:556,102:333,103:611,104:611,105:278,
+    106:278,107:556,108:278,109:889,110:611,111:611,112:611,113:611,114:389,115:556,116:333,117:611,118:556,
+    119:778,120:556,121:556,122:500,123:389,124:280,125:389,126:584,127:350,128:556,129:350,130:278,131:556,
+    132:500,133:1000,134:556,135:556,136:333,137:1000,138:667,139:333,140:1000,141:350,142:611,143:350,144:350,
+    145:278,146:278,147:500,148:500,149:350,150:556,151:1000,152:333,153:1000,154:556,155:333,156:944,157:350,
+    158:500,159:667,160:278,161:333,162:556,163:556,164:556,165:556,166:280,167:556,168:333,169:737,170:370,
+    171:556,172:584,173:333,174:737,175:333,176:400,177:584,178:333,179:333,180:333,181:611,182:556,183:278,
+    184:333,185:333,186:365,187:556,188:834,189:834,190:834,191:611,192:722,193:722,194:722,195:722,196:722,
+    197:722,198:1000,199:722,200:667,201:667,202:667,203:667,204:278,205:278,206:278,207:278,208:722,209:722,
+    210:778,211:778,212:778,213:778,214:778,215:584,216:778,217:722,218:722,219:722,220:722,221:667,222:667,
+    223:611,224:556,225:556,226:556,227:556,228:556,229:556,230:889,231:556,232:556,233:556,234:556,235:556,
+    236:278,237:278,238:278,239:278,240:611,241:611,242:611,243:611,244:611,245:611,246:611,247:584,248:611,
+    249:611,250:611,251:611,252:611,253:556,254:611,255:556
+  };
+
+  // Mirrors the site's category/section banner colors exactly (see the
+  // --bar-*-bg / --bar-*-ink CSS variables and the card-header colors near
+  // the top of this file) so the downloaded PDF reads as the same document
+  // as the on-screen form, just on paper.
+  var PDF_BAR_COLORS = {
+    technical:    { bg:"#4a86c8", ink:"#ffffff" },
+    tactical:     { bg:"#d1483f", ink:"#ffffff" },
+    physical:     { bg:"#e8b93f", ink:"#3a2c05" },
+    psychosocial: { bg:"#4f9e5c", ink:"#ffffff" },
+    grey:         { bg:"#9a9488", ink:"#211d17" },
+    gold:         { bg:"#e0a940", ink:"#241a05" },
+    green:        { bg:"#8fbf5a", ink:"#132608" },
+    red:          { bg:"#dd8f83", ink:"#2c0e08" }
+  };
+  // Mirrors the site's --band-1 .. --band-5 score colors (see bandFor()).
+  var PDF_BAND_COLORS = {
+    1: { bg:"#c8574a", ink:"#ffffff" },
+    2: { bg:"#d68e3c", ink:"#2a1c08" },
+    3: { bg:"#d3b93f", ink:"#2a2408" },
+    4: { bg:"#7fae52", ink:"#0e2408" },
+    5: { bg:"#3f8f55", ink:"#ffffff" }
+  };
+
+  // Column layout for the per-category rating tables, in points. A narrower
+  // layout context (see makePdfLayoutCtx) is used when a category table is
+  // laid out in a half-width page column instead of the full page width.
+  var PDF_TABLE_LABEL_W = 130;
+  var PDF_TABLE_SCORE_W = 55;
+  var PDF_TABLE_LABEL_W_NARROW = 108;
+  var PDF_TABLE_SCORE_W_NARROW = 45;
+  var PDF_ZEBRA_SHADE = "#f3f1ec"; // subtle alternating-row tint, same for every category
+  var PDF_RULE_WIDTH = 1.1; // points
+  var PDF_SSC_TINT_ALPHA = 0.14; // Stop/Start/Continue background tint strength
+
+  // A layout context bundles the measurements that change when content is
+  // laid out at full page width vs. in a half-width column: how wide to
+  // wrap text, and how the rating table's three columns divide up that
+  // width. Every layout function below takes one of these instead of
+  // reading page-wide constants directly, so the same block-building code
+  // works whether it's rendering full-width or side-by-side.
+  function makePdfLayoutCtx(contentW){
+    var narrow = contentW < PDF_CONTENT_W - 1;
+    var labelW = narrow ? PDF_TABLE_LABEL_W_NARROW : PDF_TABLE_LABEL_W;
+    var scoreW = narrow ? PDF_TABLE_SCORE_W_NARROW : PDF_TABLE_SCORE_W;
+    var notesStart = labelW + scoreW;
+    return { contentW: contentW, labelW: labelW, scoreW: scoreW, notesStart: notesStart, notesW: contentW - notesStart };
+  }
+  var PDF_FULL_CTX = makePdfLayoutCtx(PDF_CONTENT_W);
+  var PDF_COL_CTX = makePdfLayoutCtx(PDF_COL_W);
+
+  function hexToRgbFrac(hex){
+    hex = String(hex||"#000000").replace("#","");
+    var r = parseInt(hex.substring(0,2),16) / 255;
+    var g = parseInt(hex.substring(2,4),16) / 255;
+    var b = parseInt(hex.substring(4,6),16) / 255;
+    return [r,g,b];
+  }
+
+  // Builds a PDF color-setting operator ("rg" = nonstroking/fill, "RG" =
+  // stroking) from a CSS hex color, e.g. pdfColorOp("#4a86c8","rg").
+  function pdfColorOp(hex, op){
+    var c = hexToRgbFrac(hex);
+    return c[0].toFixed(3) + " " + c[1].toFixed(3) + " " + c[2].toFixed(3) + " " + op;
+  }
+
+  // Blends a color toward white to make a light background tint (used for
+  // the Stop/Start/Continue highlight, same idea as the site's *-wash
+  // colors) without needing PDF transparency/ExtGState support.
+  function pdfTint(hex, alpha){
+    var c = hexToRgbFrac(hex);
+    var mix = function(v){ return 1 - alpha * (1 - v); };
+    return "#" + [mix(c[0]), mix(c[1]), mix(c[2])].map(function(v){
+      var h = Math.round(v * 255).toString(16);
+      return h.length < 2 ? "0" + h : h;
+    }).join("");
+  }
+
+  function pdfCharWidthUnits(code, bold){
+    var table = bold ? PDF_HELV_BOLD_WIDTHS : PDF_HELV_WIDTHS;
+    return table[code] != null ? table[code] : 556;
+  }
+
+  // Measures a string's width in points at a given font ("F1" regular /
+  // "F2" bold) and size, using the standard metrics tables above.
+  function pdfTextWidth(text, font, size){
+    var bold = font === "F2";
+    var w = 0;
+    for(var i=0;i<text.length;i++){ w += pdfCharWidthUnits(text.charCodeAt(i), bold); }
+    return w * size / 1000;
   }
 
   // PDF's base fonts only cover the Latin-1-ish WinAnsiEncoding range, so
@@ -915,24 +1073,50 @@
     return out;
   }
 
+  // Truncates a note to at most PDF_NOTE_MAX_CHARS characters, breaking at
+  // a word boundary where possible and marking the cut with "...".
+  function pdfTruncateNote(text, maxChars){
+    if(text.length <= maxChars) return text;
+    var cut = text.slice(0, maxChars);
+    var lastSpace = cut.lastIndexOf(" ");
+    if(lastSpace > maxChars * 0.5) cut = cut.slice(0, lastSpace);
+    return cut.replace(/[\s.,;:-]+$/, "") + "...";
+  }
+
   function escapePdfString(s){
     return s.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
   }
 
-  function pdfWrapParagraph(text, maxChars){
+  // Finds the longest prefix of `text` that fits within `maxWidth` points,
+  // via binary search over measured width (used for the rare safety
+  // truncation of a rating label, and for hard-breaking a single word
+  // that's wider than a whole wrapping column on its own).
+  function pdfFitWidth(text, font, size, maxWidth){
+    if(pdfTextWidth(text, font, size) <= maxWidth) return text.length;
+    var lo = 0, hi = text.length, fit = 0;
+    while(lo <= hi){
+      var mid = Math.floor((lo + hi) / 2);
+      if(pdfTextWidth(text.slice(0, mid), font, size) <= maxWidth){ fit = mid; lo = mid + 1; }
+      else { hi = mid - 1; }
+    }
+    return fit;
+  }
+
+  function pdfWrapParagraph(text, maxWidth, font, size){
     if(text === "") return [""];
     var words = text.split(/\s+/).filter(function(w){ return w.length; });
     if(!words.length) return [""];
     var lines = [], cur = "";
     words.forEach(function(word){
       var w = word;
-      while(w.length > maxChars){
+      while(pdfTextWidth(w, font, size) > maxWidth && w.length > 1){
         if(cur){ lines.push(cur); cur = ""; }
-        lines.push(w.slice(0, maxChars));
-        w = w.slice(maxChars);
+        var fit = Math.max(1, pdfFitWidth(w, font, size, maxWidth));
+        lines.push(w.slice(0, fit));
+        w = w.slice(fit);
       }
       var candidate = cur ? (cur + " " + w) : w;
-      if(candidate.length > maxChars){
+      if(pdfTextWidth(candidate, font, size) > maxWidth){
         if(cur) lines.push(cur);
         cur = w;
       } else {
@@ -943,54 +1127,220 @@
     return lines.length ? lines : [""];
   }
 
-  function pdfWrapText(text, maxChars){
+  function pdfWrapText(text, maxWidth, font, size){
     var paras = toPdfText(text).split("\n");
     var out = [];
-    paras.forEach(function(p){ out = out.concat(pdfWrapParagraph(p, maxChars)); });
+    paras.forEach(function(p){ out = out.concat(pdfWrapParagraph(p, maxWidth, font, size)); });
     return out;
   }
 
-  // blocks: [{ kind: "title"|"h2"|"h3"|"text"|"gap", value }] — mirrors the
-  // same structure toMarkdown() builds, just typed instead of raw strings.
-  function pdfLayoutBlocks(blocks){
+  // Header row for a category's rating table: "Sub-domain | Score | Notes",
+  // bold, with a thin rule underneath in that category's bar color so the
+  // table reads as belonging to the colored banner above it. The returned
+  // line points its own `repeatHeader` back at itself, so pdfPaginate can
+  // reprint this header at the top of a new page if the table runs on.
+  function pdfLayoutTableHeader(cat, ctx){
+    var barColors = cat && cat.bar ? PDF_BAR_COLORS[cat.bar] : null;
+    var headerLine = {
+      size: PDF_BODY_SIZE, bar: null, shade: null, isTableHeader: true, w: ctx.contentW,
+      ruleBelow: barColors ? barColors.bg : PDF_INK_DEFAULT,
+      segments: [
+        { text: "Sub-domain", font:"F2", color: PDF_INK_DEFAULT, xPts: 0 },
+        { text: "Score", font:"F2", color: PDF_INK_DEFAULT, xPts: ctx.labelW },
+        { text: "Notes", font:"F2", color: PDF_INK_DEFAULT, xPts: ctx.notesStart }
+      ]
+    };
+    var arr = [headerLine];
+    headerLine.repeatHeader = arr;
+    return arr;
+  }
+
+  // One row of a rating table: label and score columns sit at fixed point
+  // offsets, score colored by band same as the on-screen chips. The note
+  // is capped to PDF_NOTE_MAX_CHARS characters, then wraps within its own
+  // column; when it wraps to more than one line, the label/score only
+  // print on the row's first line, and every line of the row shares the
+  // same zebra shade so the row still reads as one unit. `headerLines`
+  // (from pdfLayoutTableHeader) is threaded through so the header can be
+  // reprinted if this row's table runs onto a new page.
+  function pdfLayoutTableRow(item, index, headerLines, ctx){
+    var label = toPdfText(item.label);
+    var labelFit = pdfFitWidth(label, "F1", PDF_BODY_SIZE, ctx.labelW - 6);
+    if(labelFit < label.length) label = label.slice(0, labelFit);
+    var scoreText = item.score != null ? (String(item.score) + "/10") : "not rated";
+    var note = item.note ? pdfTruncateNote(toPdfText(item.note), PDF_NOTE_MAX_CHARS) : "";
+    var noteLines = note ? pdfWrapParagraph(note, ctx.notesW - 6, "F1", PDF_BODY_SIZE) : [""];
+    var shade = (index % 2 === 1) ? PDF_ZEBRA_SHADE : null;
+
+    return noteLines.map(function(noteLine, i){
+      var segments = [];
+      if(i === 0){
+        segments.push({ text: label, font:"F1", color: PDF_INK_DEFAULT, xPts: 0 });
+        if(item.score != null){
+          var bc = PDF_BAND_COLORS[bandFor(item.score)];
+          segments.push({ text: scoreText, font:"F2", color: bc ? bc.bg : PDF_INK_DEFAULT, xPts: ctx.labelW });
+        } else {
+          segments.push({ text: scoreText, font:"F1", color: "#8a8478", xPts: ctx.labelW });
+        }
+      }
+      if(noteLine) segments.push({ text: noteLine, font:"F1", color: PDF_INK_DEFAULT, xPts: ctx.notesStart });
+      return { size: PDF_BODY_SIZE, bar: null, shade: shade, w: ctx.contentW, segments: segments, repeatHeader: headerLines };
+    });
+  }
+
+  // blocks: [{ kind: "title"|"h2"|"h3"|"text"|"gap"|"tableHeader"|"tableRow", value, bar, tint }]
+  // "bar" (on h2/h3) names a PDF_BAR_COLORS key, drawn as a colored banner
+  // behind that header line. "tint" (on text) names a PDF_BAR_COLORS key,
+  // drawn as a light background tint behind that line (used for the SMART
+  // goals' Stop/Start/Continue rows). "tableHeader"/"tableRow" render a
+  // category's rating sub-domains as an aligned table with score colored
+  // by band. `ctx` (a makePdfLayoutCtx() result) sets the wrapping/column
+  // width this block list lays out at -- full page width, or one side-by-
+  // side half-width column. Returns a flat array of layout lines, each
+  // { size, bar, shade, ruleBelow, w, repeatHeader, segments:[{text,font,color,xPts}] },
+  // ready to paginate.
+  function pdfLayoutBlocks(blocks, ctx){
+    ctx = ctx || PDF_FULL_CTX;
     var lines = [];
+    var currentTableHeader = null;
     blocks.forEach(function(b){
-      if(b.kind === "gap"){ lines.push({ text:"", font:"F1", size:PDF_BODY_SIZE }); return; }
+      if(b.kind === "gap"){
+        currentTableHeader = null;
+        lines.push({ size:PDF_BODY_SIZE, bar:null, w:ctx.contentW, segments:[{ text:"", font:"F1", color:PDF_INK_DEFAULT }] });
+        return;
+      }
+      if(b.kind === "tableHeader"){
+        var headerLines = pdfLayoutTableHeader(b.cat, ctx);
+        currentTableHeader = headerLines;
+        lines = lines.concat(headerLines);
+        return;
+      }
+      if(b.kind === "tableRow"){
+        lines = lines.concat(pdfLayoutTableRow(b.item, b.index, currentTableHeader, ctx));
+        return;
+      }
+      currentTableHeader = null;
       var size = b.kind === "title" ? PDF_TITLE_SIZE : (b.kind === "h2" || b.kind === "h3") ? PDF_HEAD_SIZE : PDF_BODY_SIZE;
       var font = (b.kind === "title" || b.kind === "h2" || b.kind === "h3") ? "F2" : "F1";
-      var maxChars = pdfCharsPerLine(size);
-      pdfWrapText(b.value, maxChars).forEach(function(line){ lines.push({ text:line, font:font, size:size }); });
+      var barColors = b.bar ? PDF_BAR_COLORS[b.bar] : null;
+      var tintColors = b.tint ? PDF_BAR_COLORS[b.tint] : null;
+      var textColor = barColors ? barColors.ink : PDF_INK_DEFAULT;
+      var shade = tintColors ? pdfTint(tintColors.bg, PDF_SSC_TINT_ALPHA) : null;
+      pdfWrapText(b.value, ctx.contentW, font, size).forEach(function(line, idx){
+        var segments = [{ text:line, font:font, color:textColor }];
+        if(b.rightText && idx === 0){
+          var rightText = toPdfText(b.rightText);
+          var rtWidth = pdfTextWidth(rightText, font, size);
+          segments.push({ text:rightText, font:font, color:textColor, xPts: ctx.contentW - rtWidth });
+        }
+        lines.push({ size:size, bar: b.bar || null, shade: shade, w: ctx.contentW, segments:segments });
+      });
     });
     return lines;
   }
 
-  function pdfPaginate(lines){
-    var pages = [], current = [];
-    var y = PDF_PAGE_H - PDF_MARGIN_TOP;
+  // Paginates `lines` into pages, optionally continuing from an
+  // already-open page: `start` (if given) is { current: [existing lines on
+  // the still-open page], y: the y position to continue from }, letting a
+  // second block of content (e.g. the rating columns) keep filling the
+  // same page an earlier block (e.g. the intro) left open, instead of
+  // always starting fresh at the top of a new page. Returns
+  // { pages: [...completed pages], tailLines: [still-open page's lines],
+  // tailY: y position after the last placed line } -- call pdfFinalizePages()
+  // to fold tailLines into pages when nothing more will be appended.
+  function pdfPaginate(lines, start){
+    var pages = [];
+    var current = (start && start.current) ? start.current.slice() : [];
+    var y = (start && start.y != null) ? start.y : (PDF_PAGE_H - PDF_MARGIN_TOP);
+    function place(line){
+      current.push({ size: line.size, bar: line.bar, shade: line.shade, ruleBelow: line.ruleBelow, w: line.w, segments: line.segments, y: y });
+      y -= line.size * PDF_LEADING_FACTOR;
+    }
     lines.forEach(function(line){
       var leading = line.size * PDF_LEADING_FACTOR;
       if(y - leading < PDF_MARGIN_BOTTOM){
         pages.push(current);
         current = [];
         y = PDF_PAGE_H - PDF_MARGIN_TOP;
+        // If a rating table is running across the page break, reprint its
+        // header at the top of the new page so the columns stay labeled.
+        if(line.repeatHeader && !line.isTableHeader){
+          line.repeatHeader.forEach(place);
+        }
       }
-      current.push({ text: line.text, font: line.font, size: line.size, y: y });
-      y -= leading;
+      place(line);
     });
-    if(current.length) pages.push(current);
-    if(!pages.length) pages.push([]);
+    return { pages: pages, tailLines: current, tailY: y };
+  }
+
+  // Folds a pdfPaginate() result's still-open tail page into its completed
+  // pages list, for when nothing more will be appended to it.
+  function pdfFinalizePages(state){
+    var pages = state.pages.slice();
+    if(state.tailLines.length || !pages.length) pages.push(state.tailLines);
     return pages;
   }
 
-  // Returns a Uint8Array of a complete, valid PDF file built from `blocks`.
-  function buildPdfBytes(blocks){
-    var pages = pdfPaginate(pdfLayoutBlocks(blocks));
+  function pdfWithOffsetX(line, offsetX){
+    return { size:line.size, bar:line.bar, shade:line.shade, ruleBelow:line.ruleBelow, w:line.w, segments:line.segments, y:line.y, offsetX:offsetX };
+  }
+
+  // Lays out the intro (title/player details/season ahead) and then, on
+  // the SAME page(s) -- continuing right where the intro left off rather
+  // than starting a fresh page -- the four rating categories as two
+  // independent side-by-side half-width columns. The two columns are
+  // paginated independently of one another after that shared start point;
+  // if one runs longer than the other, its own later pages simply have a
+  // blank opposite column.
+  function pdfLayoutIntroAndRatings(introBlocks, leftBlocks, rightBlocks){
+    var introState = pdfPaginate(pdfLayoutBlocks(introBlocks, PDF_FULL_CTX));
+    var leftState = pdfPaginate(pdfLayoutBlocks(leftBlocks, PDF_COL_CTX), { current: [], y: introState.tailY });
+    var rightState = pdfPaginate(pdfLayoutBlocks(rightBlocks, PDF_COL_CTX), { current: [], y: introState.tailY });
+    var leftPages = pdfFinalizePages(leftState);
+    var rightPages = pdfFinalizePages(rightState);
+    var rightOffsetX = PDF_COL_W + PDF_COL_GUTTER;
+
+    var pages = introState.pages.slice(); // normally empty -- the intro fits on one page
+    var firstPage = introState.tailLines
+      .concat((leftPages[0] || []).map(function(ln){ return pdfWithOffsetX(ln, 0); }))
+      .concat((rightPages[0] || []).map(function(ln){ return pdfWithOffsetX(ln, rightOffsetX); }));
+    pages.push(firstPage);
+
+    var count = Math.max(leftPages.length, rightPages.length);
+    for(var i=1;i<count;i++){
+      var l = (leftPages[i] || []).map(function(ln){ return pdfWithOffsetX(ln, 0); });
+      var r = (rightPages[i] || []).map(function(ln){ return pdfWithOffsetX(ln, rightOffsetX); });
+      pages.push(l.concat(r));
+    }
+    return pages;
+  }
+
+  // Lays out one section of the document into pages. An "introRatings"
+  // section merges the intro and the rating tables onto the same page(s)
+  // (see pdfLayoutIntroAndRatings()); a "flow" section is a plain
+  // single full-width column, starting fresh on its own page (used for the
+  // closing strengths/improvements/goals summary).
+  function pdfLayoutSection(section){
+    if(section.type === "introRatings"){
+      return pdfLayoutIntroAndRatings(section.intro, section.left, section.right);
+    }
+    return pdfFinalizePages(pdfPaginate(pdfLayoutBlocks(section.blocks, PDF_FULL_CTX)));
+  }
+
+  // Returns a Uint8Array of a complete, valid PDF file built from
+  // `sections` -- an array of { type:"introRatings", intro, left, right }
+  // or { type:"flow", blocks } (see buildIdpPdfSections()).
+  function buildPdfBytes(sections){
+    var pages = [];
+    sections.forEach(function(section){
+      pages = pages.concat(pdfLayoutSection(section));
+    });
 
     var objects = [];
     function addObject(body){ objects.push(body); return objects.length; }
 
-    var fontF1 = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>");
-    var fontF2 = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>");
+    var fontF1 = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+    var fontF2 = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
 
     var pageNums = [], contentNums = [];
     pages.forEach(function(){
@@ -1007,8 +1357,36 @@
     pages.forEach(function(pageLines, i){
       var stream = "";
       pageLines.forEach(function(l){
-        if(l.text === "") return;
-        stream += "BT\n/" + l.font + " " + l.size + " Tf\n1 0 0 1 " + PDF_MARGIN_L + " " + l.y.toFixed(2) + " Tm\n(" + escapePdfString(l.text) + ") Tj\nET\n";
+        var baseX = PDF_MARGIN_L + (l.offsetX || 0);
+        var lineW = l.w != null ? l.w : PDF_CONTENT_W;
+        var rectBottom = l.y - l.size * 0.30;
+        var rectH = l.size * 1.35;
+        if(l.bar){
+          var barColors = PDF_BAR_COLORS[l.bar];
+          if(barColors){
+            var rectX = baseX - 6;
+            var rectW = lineW + 12;
+            stream += pdfColorOp(barColors.bg, "rg") + "\n";
+            stream += rectX.toFixed(2) + " " + rectBottom.toFixed(2) + " " + rectW.toFixed(2) + " " + rectH.toFixed(2) + " re f\n";
+          }
+        } else if(l.shade){
+          stream += pdfColorOp(l.shade, "rg") + "\n";
+          stream += baseX.toFixed(2) + " " + rectBottom.toFixed(2) + " " + lineW.toFixed(2) + " " + rectH.toFixed(2) + " re f\n";
+        }
+        var x = baseX;
+        (l.segments || []).forEach(function(seg){
+          var segX = (seg.xPts != null) ? (baseX + seg.xPts) : x;
+          if(seg.text){
+            stream += pdfColorOp(seg.color || PDF_INK_DEFAULT, "rg") + "\n";
+            stream += "BT\n/" + seg.font + " " + l.size + " Tf\n1 0 0 1 " + segX.toFixed(2) + " " + l.y.toFixed(2) + " Tm\n(" + escapePdfString(seg.text) + ") Tj\nET\n";
+          }
+          x = segX + pdfTextWidth(seg.text, seg.font, l.size);
+        });
+        if(l.ruleBelow){
+          var ruleY = l.y - l.size * 0.45;
+          stream += pdfColorOp(l.ruleBelow, "rg") + "\n";
+          stream += baseX.toFixed(2) + " " + ruleY.toFixed(2) + " " + lineW.toFixed(2) + " " + PDF_RULE_WIDTH.toFixed(2) + " re f\n";
+        }
       });
       objects[contentNums[i] - 1] = "<< /Length " + stream.length + " >>\nstream\n" + stream + "endstream";
       objects[pageNums[i] - 1] =
@@ -1037,54 +1415,93 @@
     return bytes;
   }
 
-  // Same content/order as toMarkdown(), just as typed blocks for the PDF
-  // layout engine above instead of a markdown string.
-  function buildIdpPdfBlocks(d){
-    var blocks = [];
-    blocks.push({ kind:"title", value:"Player IDP — " + (d.player || "Unnamed player") });
-    blocks.push({ kind:"text", value:"Date: " + (d.date || "—") + "   Age group: " + (d.ageGroup || "—") + "   Team: " + (d.team || "—") });
-    blocks.push({ kind:"text", value:"Average score: " + (d.avgScore != null ? d.avgScore : "—") + " (" + (d.ratedCount||0) + "/" + TOTAL_RATING_ITEMS + " rated)" });
-    blocks.push({ kind:"gap" });
-    blocks.push({ kind:"h2", value:"Season reflection" });
-    blocks.push({ kind:"text", value:"Goal for next season: " + (d.goalNextSeason || "—") });
-    blocks.push({ kind:"text", value:"How to achieve it: " + (d.howAchieve || "—") });
-    blocks.push({ kind:"text", value:"Positions to play more: " + ((d.positions||[]).join(", ") || "—") });
-    blocks.push({ kind:"gap" });
-    CATEGORIES.forEach(function(cat){
-      blocks.push({ kind:"h2", value:cat.title });
-      (d.ratings && d.ratings[cat.key] || []).forEach(function(item){
-        blocks.push({ kind:"text", value:"- " + item.label + ": " + (item.score != null ? item.score + "/10" : "not rated") + (item.note ? " — " + item.note : "") });
+  // Maps each SMART goal block to the same bar color as its matching
+  // rating category, so a goal's colored sub-header ties it back to the
+  // section it came from (the non-soccer goal gets the neutral grey used
+  // for the section header itself). The Stop/Start/Continue rows in each
+  // goal block are tinted with this same color, same idea as the
+  // corresponding light-colored textarea backgrounds on the web page.
+  var PDF_GOAL_BAR = { technical:"technical", tactical:"tactical", psychoSocial:"psychosocial", nonSoccer:"grey" };
+
+  // Builds the document as two sections: (1) title/player details/season
+  // ahead immediately followed by all four rating categories -- Technical+
+  // Tactical in a left column, Physical+Psycho-Social in a right column --
+  // on the same page(s); (2) areas of strength/improvement and the SMART
+  // goals, back to a single full-width column, starting fresh on its own
+  // page. See buildPdfBytes()/pdfLayoutSection() for how sections render.
+  function buildIdpPdfSections(d){
+    var intro = [];
+    intro.push({ kind:"title", value:"Player IDP — " + (d.player || "Unnamed player") });
+    intro.push({ kind:"gap" });
+
+    intro.push({ kind:"h2", value:"Player details", bar:"grey" });
+    intro.push({ kind:"text", value:"Player: " + (d.player || "—") });
+    intro.push({ kind:"text", value:"Date: " + (d.date || "—") + "   Age group: " + (d.ageGroup || "—") + "   Team: " + (d.team || "—") });
+    intro.push({ kind:"text", value:"Average score: " + (d.avgScore != null ? d.avgScore : "—") + " (" + (d.ratedCount||0) + "/" + TOTAL_RATING_ITEMS + " rated)" });
+    intro.push({ kind:"gap" });
+
+    intro.push({ kind:"h2", value:"The season ahead", bar:"gold" });
+    intro.push({ kind:"text", value:"Goal for next season: " + (d.goalNextSeason || "—") });
+    intro.push({ kind:"text", value:"How to achieve it: " + (d.howAchieve || "—") });
+    intro.push({ kind:"text", value:"Positions to play more: " + ((d.positions||[]).join(", ") || "—") });
+    intro.push({ kind:"gap" });
+
+    function categoryBlocks(list, cat){
+      var items = (d.ratings && d.ratings[cat.key]) || [];
+      var catSum = 0, catRated = 0;
+      items.forEach(function(item){ if(item.score != null){ catSum += item.score; catRated++; } });
+      var avgText = catRated ? "Avg " + (catSum/catRated).toFixed(1) : "Avg —";
+      list.push({ kind:"h2", value:cat.title, bar:cat.bar, rightText:avgText });
+      list.push({ kind:"tableHeader", cat:cat });
+      items.forEach(function(item, index){
+        list.push({ kind:"tableRow", item:item, index:index });
       });
-      blocks.push({ kind:"gap" });
-    });
-    blocks.push({ kind:"h2", value:"Areas of strength" });
+    }
+    var byKey = {};
+    CATEGORIES.forEach(function(cat){ byKey[cat.key] = cat; });
+    var ratingsLeft = [], ratingsRight = [];
+    categoryBlocks(ratingsLeft, byKey.technical);
+    ratingsLeft.push({ kind:"gap" });
+    categoryBlocks(ratingsLeft, byKey.tactical);
+    categoryBlocks(ratingsRight, byKey.physical);
+    ratingsRight.push({ kind:"gap" });
+    categoryBlocks(ratingsRight, byKey.psychoSocial);
+
+    var summary = [];
+    summary.push({ kind:"h2", value:"Areas of strength", bar:"green" });
     SI_ROWS.forEach(function(row){
       var s = (d.strengths||{})[row.key] || {};
-      blocks.push({ kind:"text", value:"- " + row.label + ": " + (s.area || "—") + (s.detail ? " — " + s.detail : "") });
+      summary.push({ kind:"text", value:"- " + row.label + ": " + (s.area || "—") + (s.detail ? " — " + s.detail : "") });
     });
-    blocks.push({ kind:"gap" });
-    blocks.push({ kind:"h2", value:"Areas for improvement" });
+    summary.push({ kind:"gap" });
+
+    summary.push({ kind:"h2", value:"Areas for improvement", bar:"red" });
     SI_ROWS.forEach(function(row){
       var im = (d.improvements||{})[row.key] || {};
-      blocks.push({ kind:"text", value:"- " + row.label + ": " + (im.area || "—") + (im.detail ? " — " + im.detail : "") });
+      summary.push({ kind:"text", value:"- " + row.label + ": " + (im.area || "—") + (im.detail ? " — " + im.detail : "") });
     });
-    blocks.push({ kind:"gap" });
-    blocks.push({ kind:"h2", value:"SMART goals" });
+    summary.push({ kind:"gap" });
+
+    summary.push({ kind:"h2", value:"SMART goals", bar:"grey" });
     GOAL_BLOCKS.forEach(function(g){
       var gd = (d.goals||{})[g.key] || {};
-      blocks.push({ kind:"h3", value:g.title });
-      blocks.push({ kind:"text", value:"Outcome goal: " + (gd.outcome || "—") });
-      blocks.push({ kind:"text", value:"- Stop: " + (gd.stop || "—") });
-      blocks.push({ kind:"text", value:"- Start: " + (gd.start || "—") });
-      blocks.push({ kind:"text", value:"- Continue: " + (gd.cont || "—") });
-      blocks.push({ kind:"text", value:"- Progress weeks 1–4: " + (gd.w1_4 || "—") });
-      blocks.push({ kind:"text", value:"- Progress weeks 5–16: " + (gd.w5_16 || "—") });
-      blocks.push({ kind:"text", value:"- Progress weeks 17+: " + (gd.w17plus || "—") });
-      blocks.push({ kind:"gap" });
+      var tintKey = PDF_GOAL_BAR[g.key] || "grey";
+      summary.push({ kind:"h3", value:g.title, bar: tintKey });
+      summary.push({ kind:"text", value:"Outcome goal: " + (gd.outcome || "—") });
+      summary.push({ kind:"text", value:"- Stop: " + (gd.stop || "—"), tint: tintKey });
+      summary.push({ kind:"text", value:"- Start: " + (gd.start || "—"), tint: tintKey });
+      summary.push({ kind:"text", value:"- Continue: " + (gd.cont || "—"), tint: tintKey });
+      summary.push({ kind:"text", value:"- Progress weeks 1–4: " + (gd.w1_4 || "—") });
+      summary.push({ kind:"text", value:"- Progress weeks 5–16: " + (gd.w5_16 || "—") });
+      summary.push({ kind:"text", value:"- Progress weeks 17+: " + (gd.w17plus || "—") });
+      summary.push({ kind:"gap" });
     });
-    return blocks;
-  }
 
+    return [
+      { type:"introRatings", intro: intro, left: ratingsLeft, right: ratingsRight },
+      { type:"flow", blocks: summary }
+    ];
+  }
   function slug(s){ return String(s||"player").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/(^-|-$)/g,"") || "player"; }
 
   // Native browser download — works anywhere this page is opened (a plain
@@ -1139,7 +1556,7 @@
     var filename = "idp-" + slug(d.player) + "-" + (d.date || "draft") + ".pdf";
     var bytes;
     try{
-      bytes = buildPdfBytes(buildIdpPdfBlocks(d));
+      bytes = buildPdfBytes(buildIdpPdfSections(d));
     }catch(e){
       if(statusEl) statusEl.textContent = "Couldn't build the PDF right now.";
       return;
