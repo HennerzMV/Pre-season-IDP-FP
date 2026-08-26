@@ -404,8 +404,8 @@
   // and the same secret word you set as SHARED_SECRET in that script.
   // Until you do, submitting here just shows the download-your-copy
   // screen — nothing is sent anywhere.
-  var SUBMIT_URL = "https://script.google.com/macros/s/AKfycbz_hzWbHZUAMm8WmBkZmcy_MqZR81Mun7YPySwCWCrR3u4kYWDFnX7y7iHg7W2AhR2M/exec";
-  var SUBMIT_SECRET = "ORINOCCO";
+  var SUBMIT_URL = "PASTE_YOUR_WEB_APP_URL_HERE";
+  var SUBMIT_SECRET = "PASTE_YOUR_SHARED_SECRET_HERE";
 
   // ---------- field definitions ----------
   var TECHNICAL = [
@@ -873,6 +873,218 @@
     return lines.join("\n");
   }
 
+  // ================= PDF export (per-submission) =================
+  // A hand-rolled, dependency-free PDF writer: no external library is
+  // loaded (this page has to keep working with no network access and no
+  // external scripts, whether it's published as a Claude artifact or
+  // hosted plainly), so this builds the PDF file bytes directly using the
+  // built-in Courier / Courier-Bold fonts every PDF viewer supports
+  // without any embedded font data. Courier is fixed-width, which keeps
+  // line-wrapping simple and reliable (every character is the same width,
+  // so wrapping is just counting characters — no font-metrics table
+  // needed, unlike a proportional font such as Helvetica).
+  var PDF_PAGE_W = 595, PDF_PAGE_H = 842; // A4, in points
+  var PDF_MARGIN_L = 50, PDF_MARGIN_R = 50, PDF_MARGIN_TOP = 56, PDF_MARGIN_BOTTOM = 50;
+  var PDF_BODY_SIZE = 9.5, PDF_HEAD_SIZE = 11, PDF_TITLE_SIZE = 15;
+  var PDF_CHAR_W_FACTOR = 0.6; // Courier's fixed advance width, as a fraction of its font size
+  var PDF_LEADING_FACTOR = 1.4;
+
+  function pdfCharsPerLine(size){
+    return Math.max(20, Math.floor((PDF_PAGE_W - PDF_MARGIN_L - PDF_MARGIN_R) / (size * PDF_CHAR_W_FACTOR)));
+  }
+
+  // PDF's base fonts only cover the Latin-1-ish WinAnsiEncoding range, so
+  // smart quotes/dashes get normalized to plain ASCII first, and anything
+  // still outside that range (emoji, non-Latin scripts) becomes "?" rather
+  // than corrupting the file.
+  function toPdfText(s){
+    s = String(s == null ? "" : s)
+      .replace(/[‘’]/g, "'")
+      .replace(/[“”]/g, '"')
+      .replace(/[–—]/g, "-")
+      .replace(/…/g, "...")
+      .replace(/✓/g, "OK");
+    var out = "";
+    for(var i=0;i<s.length;i++){
+      var cp = s.charCodeAt(i);
+      if(cp === 9){ out += "    "; continue; }
+      if(cp === 10 || cp === 13){ out += "\n"; continue; }
+      if((cp >= 32 && cp <= 126) || (cp >= 160 && cp <= 255)){ out += s[i]; }
+      else { out += "?"; }
+    }
+    return out;
+  }
+
+  function escapePdfString(s){
+    return s.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+  }
+
+  function pdfWrapParagraph(text, maxChars){
+    if(text === "") return [""];
+    var words = text.split(/\s+/).filter(function(w){ return w.length; });
+    if(!words.length) return [""];
+    var lines = [], cur = "";
+    words.forEach(function(word){
+      var w = word;
+      while(w.length > maxChars){
+        if(cur){ lines.push(cur); cur = ""; }
+        lines.push(w.slice(0, maxChars));
+        w = w.slice(maxChars);
+      }
+      var candidate = cur ? (cur + " " + w) : w;
+      if(candidate.length > maxChars){
+        if(cur) lines.push(cur);
+        cur = w;
+      } else {
+        cur = candidate;
+      }
+    });
+    if(cur) lines.push(cur);
+    return lines.length ? lines : [""];
+  }
+
+  function pdfWrapText(text, maxChars){
+    var paras = toPdfText(text).split("\n");
+    var out = [];
+    paras.forEach(function(p){ out = out.concat(pdfWrapParagraph(p, maxChars)); });
+    return out;
+  }
+
+  // blocks: [{ kind: "title"|"h2"|"h3"|"text"|"gap", value }] — mirrors the
+  // same structure toMarkdown() builds, just typed instead of raw strings.
+  function pdfLayoutBlocks(blocks){
+    var lines = [];
+    blocks.forEach(function(b){
+      if(b.kind === "gap"){ lines.push({ text:"", font:"F1", size:PDF_BODY_SIZE }); return; }
+      var size = b.kind === "title" ? PDF_TITLE_SIZE : (b.kind === "h2" || b.kind === "h3") ? PDF_HEAD_SIZE : PDF_BODY_SIZE;
+      var font = (b.kind === "title" || b.kind === "h2" || b.kind === "h3") ? "F2" : "F1";
+      var maxChars = pdfCharsPerLine(size);
+      pdfWrapText(b.value, maxChars).forEach(function(line){ lines.push({ text:line, font:font, size:size }); });
+    });
+    return lines;
+  }
+
+  function pdfPaginate(lines){
+    var pages = [], current = [];
+    var y = PDF_PAGE_H - PDF_MARGIN_TOP;
+    lines.forEach(function(line){
+      var leading = line.size * PDF_LEADING_FACTOR;
+      if(y - leading < PDF_MARGIN_BOTTOM){
+        pages.push(current);
+        current = [];
+        y = PDF_PAGE_H - PDF_MARGIN_TOP;
+      }
+      current.push({ text: line.text, font: line.font, size: line.size, y: y });
+      y -= leading;
+    });
+    if(current.length) pages.push(current);
+    if(!pages.length) pages.push([]);
+    return pages;
+  }
+
+  // Returns a Uint8Array of a complete, valid PDF file built from `blocks`.
+  function buildPdfBytes(blocks){
+    var pages = pdfPaginate(pdfLayoutBlocks(blocks));
+
+    var objects = [];
+    function addObject(body){ objects.push(body); return objects.length; }
+
+    var fontF1 = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>");
+    var fontF2 = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>");
+
+    var pageNums = [], contentNums = [];
+    pages.forEach(function(){
+      pageNums.push(addObject("PLACEHOLDER"));
+      contentNums.push(addObject("PLACEHOLDER"));
+    });
+
+    var pagesObjNum = addObject("PLACEHOLDER");
+    var catalogObjNum = addObject("<< /Type /Catalog /Pages " + pagesObjNum + " 0 R >>");
+
+    objects[pagesObjNum - 1] =
+      "<< /Type /Pages /Kids [" + pageNums.map(function(n){ return n + " 0 R"; }).join(" ") + "] /Count " + pageNums.length + " >>";
+
+    pages.forEach(function(pageLines, i){
+      var stream = "";
+      pageLines.forEach(function(l){
+        if(l.text === "") return;
+        stream += "BT\n/" + l.font + " " + l.size + " Tf\n1 0 0 1 " + PDF_MARGIN_L + " " + l.y.toFixed(2) + " Tm\n(" + escapePdfString(l.text) + ") Tj\nET\n";
+      });
+      objects[contentNums[i] - 1] = "<< /Length " + stream.length + " >>\nstream\n" + stream + "endstream";
+      objects[pageNums[i] - 1] =
+        "<< /Type /Page /Parent " + pagesObjNum + " 0 R /MediaBox [0 0 " + PDF_PAGE_W + " " + PDF_PAGE_H + "] " +
+        "/Resources << /Font << /F1 " + fontF1 + " 0 R /F2 " + fontF2 + " 0 R >> >> " +
+        "/Contents " + contentNums[i] + " 0 R >>";
+    });
+
+    var out = "%PDF-1.4\n";
+    var offsets = [0];
+    for(var i=0;i<objects.length;i++){
+      offsets.push(out.length);
+      out += (i+1) + " 0 obj\n" + objects[i] + "\nendobj\n";
+    }
+    var xrefStart = out.length;
+    out += "xref\n0 " + (objects.length+1) + "\n";
+    out += "0000000000 65535 f \n";
+    for(var j=1;j<offsets.length;j++){
+      out += String(offsets[j]).padStart(10, "0") + " 00000 n \n";
+    }
+    out += "trailer\n<< /Size " + (objects.length+1) + " /Root " + catalogObjNum + " 0 R >>\n";
+    out += "startxref\n" + xrefStart + "\n%%EOF";
+
+    var bytes = new Uint8Array(out.length);
+    for(var k=0;k<out.length;k++) bytes[k] = out.charCodeAt(k) & 0xFF;
+    return bytes;
+  }
+
+  // Same content/order as toMarkdown(), just as typed blocks for the PDF
+  // layout engine above instead of a markdown string.
+  function buildIdpPdfBlocks(d){
+    var blocks = [];
+    blocks.push({ kind:"title", value:"Player IDP — " + (d.player || "Unnamed player") });
+    blocks.push({ kind:"text", value:"Date: " + (d.date || "—") + "   Age group: " + (d.ageGroup || "—") + "   Team: " + (d.team || "—") });
+    blocks.push({ kind:"text", value:"Average score: " + (d.avgScore != null ? d.avgScore : "—") + " (" + (d.ratedCount||0) + "/" + TOTAL_RATING_ITEMS + " rated)" });
+    blocks.push({ kind:"gap" });
+    blocks.push({ kind:"h2", value:"Season reflection" });
+    blocks.push({ kind:"text", value:"Goal for next season: " + (d.goalNextSeason || "—") });
+    blocks.push({ kind:"text", value:"How to achieve it: " + (d.howAchieve || "—") });
+    blocks.push({ kind:"text", value:"Positions to play more: " + ((d.positions||[]).join(", ") || "—") });
+    blocks.push({ kind:"gap" });
+    CATEGORIES.forEach(function(cat){
+      blocks.push({ kind:"h2", value:cat.title });
+      (d.ratings && d.ratings[cat.key] || []).forEach(function(item){
+        blocks.push({ kind:"text", value:"- " + item.label + ": " + (item.score != null ? item.score + "/10" : "not rated") + (item.note ? " — " + item.note : "") });
+      });
+      blocks.push({ kind:"gap" });
+    });
+    blocks.push({ kind:"h2", value:"Areas of strength" });
+    SI_ROWS.forEach(function(row){
+      var s = (d.strengths||{})[row.key] || {};
+      blocks.push({ kind:"text", value:"- " + row.label + ": " + (s.area || "—") + (s.detail ? " — " + s.detail : "") });
+    });
+    blocks.push({ kind:"gap" });
+    blocks.push({ kind:"h2", value:"Areas for improvement" });
+    SI_ROWS.forEach(function(row){
+      var im = (d.improvements||{})[row.key] || {};
+      blocks.push({ kind:"text", value:"- " + row.label + ": " + (im.area || "—") + (im.detail ? " — " + im.detail : "") });
+    });
+    blocks.push({ kind:"gap" });
+    blocks.push({ kind:"h2", value:"SMART goals" });
+    GOAL_BLOCKS.forEach(function(g){
+      var gd = (d.goals||{})[g.key] || {};
+      blocks.push({ kind:"h3", value:g.title });
+      blocks.push({ kind:"text", value:"Outcome goal: " + (gd.outcome || "—") });
+      blocks.push({ kind:"text", value:"- Stop: " + (gd.stop || "—") });
+      blocks.push({ kind:"text", value:"- Start: " + (gd.start || "—") });
+      blocks.push({ kind:"text", value:"- Continue: " + (gd.cont || "—") });
+      blocks.push({ kind:"text", value:"- Progress weeks 1–4: " + (gd.w1_4 || "—") });
+      blocks.push({ kind:"text", value:"- Progress weeks 5–16: " + (gd.w5_16 || "—") });
+      blocks.push({ kind:"text", value:"- Progress weeks 17+: " + (gd.w17plus || "—") });
+      blocks.push({ kind:"gap" });
+    });
+    return blocks;
+  }
+
   function slug(s){ return String(s||"player").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/(^-|-$)/g,"") || "player"; }
 
   // Native browser download — works anywhere this page is opened (a plain
@@ -912,6 +1124,68 @@
       if(!statusEl) return;
       if(err && err.code === "declined") statusEl.textContent = "";
       else statusEl.textContent = "Couldn't download right now.";
+    });
+  }
+
+  // This is what the "Download a copy" / "Download your copy" buttons
+  // actually call — a real .pdf file, built with buildPdfBytes() above.
+  // Tries the platform's downloads capability first (nicer save prompt on
+  // hosts that support it); if that's unavailable OR the host hasn't
+  // enabled .pdf specifically (some do, some only allow a base set of
+  // extensions), falls back to a plain browser download, which has no
+  // such restriction.
+  function downloadPdf(d, statusElId){
+    var statusEl = statusElId ? document.getElementById(statusElId) : null;
+    var filename = "idp-" + slug(d.player) + "-" + (d.date || "draft") + ".pdf";
+    var bytes;
+    try{
+      bytes = buildPdfBytes(buildIdpPdfBlocks(d));
+    }catch(e){
+      if(statusEl) statusEl.textContent = "Couldn't build the PDF right now.";
+      return;
+    }
+    if(!downloadsApi){
+      try{
+        var blob = new Blob([bytes], { type: "application/pdf" });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+        if(statusEl) statusEl.textContent = "Downloaded.";
+      }catch(e){
+        if(statusEl) statusEl.textContent = "Couldn't download right now.";
+      }
+      return;
+    }
+    downloadsApi.save({ filename: filename, data: bytes }).then(function(){
+      if(statusEl) statusEl.textContent = "Downloaded.";
+    }).catch(function(err){
+      var code = err && err.code;
+      if(code === "declined"){ if(statusEl) statusEl.textContent = ""; return; }
+      if(code === "extension_not_enabled" || code === "rejected_extension"){
+        // This host's downloads capability won't allow .pdf specifically —
+        // fall back to a plain browser download instead of giving up.
+        try{
+          var blob2 = new Blob([bytes], { type: "application/pdf" });
+          var url2 = URL.createObjectURL(blob2);
+          var a2 = document.createElement("a");
+          a2.href = url2;
+          a2.download = filename;
+          document.body.appendChild(a2);
+          a2.click();
+          document.body.removeChild(a2);
+          setTimeout(function(){ URL.revokeObjectURL(url2); }, 1000);
+          if(statusEl) statusEl.textContent = "Downloaded.";
+        }catch(e){
+          if(statusEl) statusEl.textContent = "Couldn't download right now.";
+        }
+        return;
+      }
+      if(statusEl) statusEl.textContent = "Couldn't download right now.";
     });
   }
 
@@ -959,7 +1233,7 @@
         '</div>' +
         '<p class="submit-note" id="tyStatusNote"></p>' +
       '</div>';
-    document.getElementById("tyDownloadBtn").addEventListener("click", function(){ downloadMarkdown(d, "tyStatusNote"); });
+    document.getElementById("tyDownloadBtn").addEventListener("click", function(){ downloadPdf(d, "tyStatusNote"); });
     document.getElementById("tyAnotherBtn").addEventListener("click", function(){ location.reload(); });
   }
 
@@ -1004,7 +1278,7 @@
   function wire(){
     document.getElementById("submitBtn").addEventListener("click", submitForm);
     document.getElementById("downloadDraftBtn").addEventListener("click", function(){
-      downloadMarkdown(collectFormData(), "submitStatusNote");
+      downloadPdf(collectFormData(), "submitStatusNote");
     });
     document.getElementById("formWrap").addEventListener("click", function(e){
       var btn = e.target.closest(".score-btn");
