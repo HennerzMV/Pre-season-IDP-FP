@@ -29,12 +29,16 @@
     --bar-red-ink:#2c0e08;
     --bar-technical-bg:#4a86c8;
     --bar-technical-ink:#ffffff;
-    --bar-tactical-bg:#9066c9;
+    --bar-technical-wash:rgba(74,134,200,0.12);
+    --bar-tactical-bg:#d1483f;
     --bar-tactical-ink:#ffffff;
-    --bar-physical-bg:#f0923d;
-    --bar-physical-ink:#3a1e05;
-    --bar-psychosocial-bg:#2f9c92;
+    --bar-tactical-wash:rgba(209,72,63,0.12);
+    --bar-physical-bg:#e8b93f;
+    --bar-physical-ink:#3a2c05;
+    --bar-physical-wash:rgba(232,185,63,0.16);
+    --bar-psychosocial-bg:#4f9e5c;
     --bar-psychosocial-ink:#ffffff;
+    --bar-psychosocial-wash:rgba(79,158,92,0.12);
     --band-1:#c8574a;
     --band-2:#d68e3c;
     --band-3:#d3b93f;
@@ -224,6 +228,12 @@
   .ssc-tag.start{ background:var(--warn-wash); color:var(--warn); }
   .ssc-tag.cont{ background:var(--good-wash); color:var(--good); }
   @media (max-width:640px){ .sscarow{ grid-template-columns:1fr; } }
+  /* Stop/Start/Continue answer boxes get a light background tint matching
+     their goal's category color, so it's visually clear at a glance which
+     goal (Technical/Tactical/Psycho-Social) each block belongs to. */
+  .ssc-input.cat-technical{ background:var(--bar-technical-wash); border-color:rgba(74,134,200,0.35); }
+  .ssc-input.cat-tactical{ background:var(--bar-tactical-wash); border-color:rgba(209,72,63,0.35); }
+  .ssc-input.cat-psycho-social{ background:var(--bar-psychosocial-wash); border-color:rgba(79,158,92,0.35); }
   .progress-cols{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:12px; }
   @media (max-width:640px){ .progress-cols{ grid-template-columns:1fr; } }
   .progress-cols .pc-label{ font-size:0.72rem; font-weight:600; color:var(--ink-muted); margin-bottom:4px; display:block; font-family:var(--font-mono); }
@@ -381,12 +391,21 @@
 
   </div>
 
-  <p class="footer-note">Player IDP · this page doesn't save or share your answers anywhere — download your copy below, then submit your official copy using the link your coach gave you.</p>
+  <p class="footer-note">Player IDP · submitting sends your answers privately to your coach — nobody else can see them — and you can download your own copy too.</p>
 </div>
 
 <script>
 "use strict";
 (function(){
+
+  // ================= private submission delivery =================
+  // Paste in the "Web app URL" you get from deploying the companion
+  // player_idp_receiver.gs script (Deploy > New deployment > Web app),
+  // and the same secret word you set as SHARED_SECRET in that script.
+  // Until you do, submitting here just shows the download-your-copy
+  // screen — nothing is sent anywhere.
+  var SUBMIT_URL = "PASTE_YOUR_WEB_APP_URL_HERE";
+  var SUBMIT_SECRET = "PASTE_YOUR_SHARED_SECRET_HERE";
 
   // ---------- field definitions ----------
   var TECHNICAL = [
@@ -620,12 +639,19 @@
     });
   }
 
+  // Maps a goal block's key to its matching category color class, so the
+  // Stop/Start/Continue boxes for e.g. the Technical goal pick up the same
+  // blue used for the Technical rating card. The Non-soccer goal has no
+  // category of its own, so it gets no tint (plain neutral boxes).
+  var GOAL_CATEGORY_CLASS = { technical:"cat-technical", tactical:"cat-tactical", psychoSocial:"cat-psycho-social" };
+
   function goalFieldsHTML(key){
+    var tintClass = GOAL_CATEGORY_CLASS[key] ? (" " + GOAL_CATEGORY_CLASS[key]) : "";
     return (
       '<div class="field-row"><span class="field-label">Outcome goal</span><textarea id="goal_' + key + '_outcome" rows="2"></textarea></div>' +
-      '<div class="sscarow"><div class="ssc-tag stop">Stop</div><textarea id="goal_' + key + '_stop" rows="2"></textarea></div>' +
-      '<div class="sscarow"><div class="ssc-tag start">Start</div><textarea id="goal_' + key + '_start" rows="2"></textarea></div>' +
-      '<div class="sscarow"><div class="ssc-tag cont">Continue</div><textarea id="goal_' + key + '_continue" rows="2"></textarea></div>' +
+      '<div class="sscarow"><div class="ssc-tag stop">Stop</div><textarea class="ssc-input' + tintClass + '" id="goal_' + key + '_stop" rows="2"></textarea></div>' +
+      '<div class="sscarow"><div class="ssc-tag start">Start</div><textarea class="ssc-input' + tintClass + '" id="goal_' + key + '_start" rows="2"></textarea></div>' +
+      '<div class="sscarow"><div class="ssc-tag cont">Continue</div><textarea class="ssc-input' + tintClass + '" id="goal_' + key + '_continue" rows="2"></textarea></div>' +
       '<div class="progress-cols">' +
         '<div><span class="pc-label">Weeks 1–4</span><textarea id="goal_' + key + '_w1_4" rows="2"></textarea></div>' +
         '<div><span class="pc-label">Weeks 5–16</span><textarea id="goal_' + key + '_w5_16" rows="2"></textarea></div>' +
@@ -901,15 +927,32 @@
     document.getElementById("submitBtn").textContent = isSubmitting ? "Submitting…" : "Submit my IDP";
   }
 
-  function showThankYou(d){
+  // delivered: true = confirmed received privately by the coach's sheet;
+  // "unconfigured" = no receiver is set up (SUBMIT_URL still a
+  // placeholder); "rejected" = the receiver responded but declined the
+  // submission (e.g. the secret in this page no longer matches the
+  // script's); "unknown" = we sent it but couldn't confirm the coach's
+  // server got it (this can happen even when the send worked — see
+  // submitForm below).
+  function showThankYou(d, delivered){
     document.getElementById("formWrap").style.display = "none";
     var wrap = document.getElementById("thankyouWrap");
     wrap.style.display = "block";
+    var message;
+    if(delivered === true){
+      message = "Your IDP has been sent straight to your coach and saved privately — you're all set. Download your copy below too, if you'd like to keep one for yourself.";
+    } else if(delivered === "rejected"){
+      message = "Your coach's system didn't accept this submission — something's likely misconfigured on their end (e.g. a changed setup key). Download your copy below and let your coach know, so they can check it.";
+    } else if(delivered === "unconfigured"){
+      message = "This page isn't connected to your coach yet, so nothing was sent automatically. Download your copy below and get it to your coach directly.";
+    } else {
+      message = "Your IDP was sent, but we couldn't fully confirm your coach's system received it (this sometimes happens even when it worked). Download your copy below just in case, and check with your coach if you're not sure it arrived.";
+    }
     wrap.innerHTML =
       '<div class="card thankyou">' +
         '<div class="big-check">✓</div>' +
         '<h2>Submitted, ' + esc(d.player || "player") + '!</h2>' +
-        '<p>Your IDP is complete. This page doesn’t send your answers anywhere by itself, so download your copy below, then submit your official copy using the link your coach gave you — that’s the only place your responses are saved, and only your coach can see them there.</p>' +
+        '<p>' + message + '</p>' +
         '<div class="submit-bar" style="justify-content:center;">' +
           '<button class="btn btn-primary" id="tyDownloadBtn" type="button">Download your copy</button>' +
           '<button class="btn btn-ghost" id="tyAnotherBtn" type="button">Start another response</button>' +
@@ -929,7 +972,32 @@
     var submission = Object.assign({}, data, {
       submittedAt: new Date().toISOString()
     });
-    showThankYou(submission);
+
+    if(!SUBMIT_URL || SUBMIT_URL.indexOf("PASTE_YOUR_WEB_APP_URL_HERE") !== -1){
+      showThankYou(submission, "unconfigured");
+      return;
+    }
+
+    setSubmitting(true);
+    var payload = Object.assign({}, submission, {
+      secret: SUBMIT_SECRET,
+      markdown: toMarkdown(submission)
+    });
+    fetch(SUBMIT_URL, { method: "POST", body: JSON.stringify(payload) })
+      .then(function(res){ return res.json(); })
+      .then(function(json){
+        setSubmitting(false);
+        showThankYou(submission, (json && json.ok) ? true : "rejected");
+      })
+      .catch(function(){
+        // The request may well have gone through and been written to the
+        // sheet — the fetch can fail here purely because the browser
+        // couldn't read the cross-origin response, not because the write
+        // failed. We genuinely can't tell the difference from here, so
+        // say so rather than guessing either way.
+        setSubmitting(false);
+        showThankYou(submission, "unknown");
+      });
   }
 
   // ================= wiring =================
